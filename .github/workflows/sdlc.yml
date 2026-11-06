@@ -1,0 +1,173 @@
+name: sdlc
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build --build-arg GITHUB_SHA=${{ github.sha }} -t citybike:${{ github.sha }} .
+
+      - name: Save Docker image
+        run: |
+          docker save citybike:${{ github.sha }} -o /tmp/citybike.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: citybike-image
+          path: /tmp/citybike.tar
+
+  staging:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: citybike-image
+          path: /tmp
+
+      - name: Load Docker image & Run Staging Gate
+        run: |
+          docker load -i /tmp/citybike.tar
+          docker rm -f citybike-gate 2>/dev/null || true
+          docker run -d --name citybike-gate -p 4173:4173 -e APP_ENV=staging citybike:${{ github.sha }}
+          
+          echo "Waiting for /health..."
+          for i in {1..30}; do
+            curl -fsS http://localhost:4173/health && break || sleep 1
+          done
+          
+          chmod +x scripts/*.sh
+          ./scripts/test-staging.sh
+          docker rm -f citybike-gate
+
+  uat:
+    needs: staging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: citybike-image
+          path: /tmp
+
+      - name: Load Docker image & Run UAT Gate
+        run: |
+          docker load -i /tmp/citybike.tar
+          docker rm -f citybike-gate 2>/dev/null || true
+          docker run -d --name citybike-gate -p 4173:4173 -e APP_ENV=uat citybike:${{ github.sha }}
+          
+          echo "Waiting for /health..."
+          for i in {1..30}; do
+            curl -fsS http://localhost:4173/health && break || sleep 1
+          done
+          
+          chmod +x scripts/*.sh
+          ./scripts/test-uat.sh
+          docker rm -f citybike-gate
+
+  oat:
+    needs: uat
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: citybike-image
+          path: /tmp
+
+      - name: Load Docker image & Run OAT Gate
+        run: |
+          docker load -i /tmp/citybike.tar
+          docker rm -f citybike-gate 2>/dev/null || true
+          docker run -d --name citybike-gate -p 4173:4173 -e APP_ENV=oat citybike:${{ github.sha }}
+          
+          echo "Waiting for /health..."
+          for i in {1..30}; do
+            curl -fsS http://localhost:4173/health && break || sleep 1
+          done
+          
+          chmod +x scripts/*.sh
+          ./scripts/test-oat.sh
+          docker rm -f citybike-gate
+
+  preprod:
+    needs: oat
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: citybike-image
+          path: /tmp
+
+      - name: Load Docker image & Run Preprod Gate
+        env:
+          PROD_API_KEY: ${{ secrets.PROD_API_KEY }}
+          IMAGE_NAME: citybike:${{ github.sha }}
+        run: |
+          docker load -i /tmp/citybike.tar
+          docker rm -f citybike-gate 2>/dev/null || true
+          docker run -d --name citybike-gate -p 4173:4173 -e APP_ENV=preprod -e PROD_API_KEY=$PROD_API_KEY citybike:${{ github.sha }}
+          
+          echo "Waiting for /health..."
+          for i in {1..30}; do
+            curl -fsS http://localhost:4173/health && break || sleep 1
+          done
+          
+          chmod +x scripts/*.sh
+          ./scripts/test-preprod.sh
+          docker rm -f citybike-gate
+
+  prod:
+    needs: preprod
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: citybike-image
+          path: /tmp
+
+      - name: Load Docker image & Run Prod Gate
+        env:
+          PROD_API_KEY: ${{ secrets.PROD_API_KEY }}
+        run: |
+          docker load -i /tmp/citybike.tar
+          docker rm -f citybike-gate 2>/dev/null || true
+          docker run -d --name citybike-gate -p 4173:4173 -e APP_ENV=production -e PROD_API_KEY=$PROD_API_KEY citybike:${{ github.sha }}
+          
+          echo "Waiting for /health..."
+          for i in {1..30}; do
+            curl -fsS http://localhost:4173/health && break || sleep 1
+          done
+          
+          chmod +x scripts/*.sh
+          ./scripts/test-prod.sh
+          docker rm -f citybike-gate
